@@ -17,18 +17,25 @@
   const awemeTimeMap = new Map();
   const cardState = new Map();
   const videoCardIndex = new Map();
-  let lastPageEventTick = 0;
 
+  let lastPageEventTick = 0;
   let panelReady = false;
   let mutationObserver = null;
   let rescanTimer = null;
   let statusNode = null;
+  let panelBodyNode = null;
   let targetInput = null;
+  let yearSelect = null;
+  let monthSelect = null;
+  let daySelect = null;
+  let collapseButton = null;
   let searchButton = null;
   let continueButton = null;
   let stopButton = null;
   let searchState = null;
   let lastRouteSignature = "";
+  let panelCollapsed = false;
+
   let sessionState = {
     scrollTarget: null,
     lastSuggestedPosition: -Infinity,
@@ -75,7 +82,7 @@
     const normalized = text.replace(/\s+/g, " ");
     const patterns = [
       /(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})/,
-      /(20\d{2})\u5E74(\d{1,2})\u6708(\d{1,2})\u65E5?/
+      /(20\d{2})年(\d{1,2})月(\d{1,2})日?/
     ];
 
     for (const pattern of patterns) {
@@ -101,12 +108,7 @@
       return null;
     }
 
-    const patterns = [
-      /\/video\/(\d+)/,
-      /modal_id=(\d+)/,
-      /aweme_id=(\d+)/
-    ];
-
+    const patterns = [/\/video\/(\d+)/, /modal_id=(\d+)/, /aweme_id=(\d+)/];
     for (const pattern of patterns) {
       const match = href.match(pattern);
       if (match) {
@@ -141,7 +143,6 @@
     if (videoId && awemeTimeMap.has(videoId)) {
       return awemeTimeMap.get(videoId);
     }
-
     return parseTextDate(card.textContent || "");
   }
 
@@ -153,37 +154,145 @@
     return `${year}-${month}-${day}`;
   }
 
+  function getDistanceDays(distance) {
+    return Math.round(distance / 86400000);
+  }
+
   function isWithinMatchWindow(distance) {
     return distance <= MATCH_WINDOW_MS;
-  }
-
-  function getTargetTimestamp() {
-    if (!targetInput?.value) {
-      return null;
-    }
-
-    const timestamp = new Date(`${targetInput.value}T00:00:00`).getTime();
-    return Number.isFinite(timestamp) ? timestamp : null;
-  }
-
-  async function saveTargetDate() {
-    await chrome.storage.local.set({
-      [STORAGE_KEY]: { targetDate: targetInput?.value || "" }
-    });
-  }
-
-  async function restoreTargetDate() {
-    const stored = await chrome.storage.local.get(STORAGE_KEY);
-    const payload = stored[STORAGE_KEY];
-    if (payload?.targetDate && targetInput) {
-      targetInput.value = payload.targetDate;
-    }
   }
 
   function updateStatus(message) {
     if (statusNode) {
       statusNode.textContent = message;
     }
+  }
+
+  function getDaysInMonth(year, month) {
+    if (!year || !month) {
+      return 31;
+    }
+    return new Date(Number(year), Number(month), 0).getDate();
+  }
+
+  function populateDateSelect(select, start, end, formatter) {
+    if (!select) {
+      return;
+    }
+
+    const options = [];
+    for (let value = start; value <= end; value += 1) {
+      options.push(`<option value="${value}">${formatter ? formatter(value) : value}</option>`);
+    }
+    select.innerHTML = options.join("");
+  }
+
+  function populateYearSelect() {
+    if (!yearSelect) {
+      return;
+    }
+
+    const currentYear = new Date().getFullYear();
+    const options = [];
+    for (let year = currentYear; year >= 2016; year -= 1) {
+      options.push(`<option value="${year}">${year}</option>`);
+    }
+    yearSelect.innerHTML = options.join("");
+  }
+
+  function populateMonthSelect() {
+    populateDateSelect(monthSelect, 1, 12, (value) => String(value).padStart(2, "0"));
+  }
+
+  function populateDaySelect(preferredDay) {
+    const year = Number(yearSelect?.value || 0);
+    const month = Number(monthSelect?.value || 0);
+    const maxDay = getDaysInMonth(year, month);
+    populateDateSelect(daySelect, 1, maxDay, (value) => String(value).padStart(2, "0"));
+
+    if (!daySelect) {
+      return;
+    }
+
+    const nextDay = Math.min(Number(preferredDay || daySelect.value || 1), maxDay);
+    daySelect.value = String(nextDay);
+  }
+
+  function syncTargetInputFromSelects() {
+    if (!targetInput || !yearSelect || !monthSelect || !daySelect) {
+      return;
+    }
+
+    const year = yearSelect.value;
+    const month = String(monthSelect.value).padStart(2, "0");
+    const day = String(daySelect.value).padStart(2, "0");
+    targetInput.value = `${year}-${month}-${day}`;
+  }
+
+  function getTargetTimestamp() {
+    if (!targetInput?.value) {
+      return null;
+    }
+    const timestamp = new Date(`${targetInput.value}T00:00:00`).getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  function applyDateValue(value) {
+    if (!value || !yearSelect || !monthSelect || !daySelect) {
+      return;
+    }
+
+    const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) {
+      return;
+    }
+
+    yearSelect.value = String(Number(match[1]));
+    monthSelect.value = String(Number(match[2]));
+    populateDaySelect(Number(match[3]));
+    daySelect.value = String(Number(match[3]));
+    syncTargetInputFromSelects();
+  }
+
+  function setDefaultDateParts() {
+    const today = new Date();
+    if (!yearSelect || !monthSelect || !daySelect) {
+      return;
+    }
+
+    yearSelect.value = String(today.getFullYear());
+    monthSelect.value = String(today.getMonth() + 1);
+    populateDaySelect(today.getDate());
+    daySelect.value = String(today.getDate());
+    syncTargetInputFromSelects();
+  }
+
+  async function savePanelState() {
+    await chrome.storage.local.set({
+      [STORAGE_KEY]: {
+        targetDate: targetInput?.value || "",
+        collapsed: panelCollapsed
+      }
+    });
+  }
+
+  async function restorePanelState() {
+    const stored = await chrome.storage.local.get(STORAGE_KEY);
+    const payload = stored[STORAGE_KEY];
+    panelCollapsed = Boolean(payload?.collapsed);
+
+    if (payload?.targetDate) {
+      applyDateValue(payload.targetDate);
+    } else {
+      setDefaultDateParts();
+    }
+  }
+
+  async function handleDateSelectionChange() {
+    populateDaySelect(daySelect?.value);
+    syncTargetInputFromSelects();
+    await savePanelState();
+    refreshStatus();
   }
 
   function isVisibleText(text) {
@@ -235,23 +344,16 @@
       }
     }
 
-    const search = window.location.search;
-    if (/(?:\?|&)(?:tab|showTab)=(?:like|likes|favorite|favourite)/i.test(search)) {
-      return true;
-    }
-
-    return false;
+    return /(?:\?|&)(?:tab|showTab)=(?:like|likes|favorite|favourite)/i.test(window.location.search);
   }
 
   function isLikesListContext() {
     if (!isUserProfileRoute()) {
       return false;
     }
-
     if (isVideoDetailRoute()) {
       return false;
     }
-
     return hasActiveLikeTab();
   }
 
@@ -267,15 +369,39 @@
     panel.classList.toggle("dlf-panel--hidden", !isVisible);
   }
 
-  function stopSearchInternal({ message = "", refresh = true } = {}) {
-    if (searchState) {
-      searchState.running = false;
+  function renderPanelCollapsedState() {
+    const panel = getPanelNode();
+    if (!panel || !panelBodyNode || !collapseButton) {
+      return;
     }
-    setSearchRunning(false);
-    if (refresh) {
-      refreshStatus(message ? [message] : []);
-    } else if (message) {
-      updateStatus(message);
+
+    panel.classList.toggle("dlf-panel--collapsed", panelCollapsed);
+    panelBodyNode.setAttribute("aria-hidden", panelCollapsed ? "true" : "false");
+    collapseButton.textContent = panelCollapsed ? "展开" : "收起";
+    collapseButton.setAttribute("aria-label", panelCollapsed ? "展开日期导航插件" : "收起日期导航插件");
+  }
+
+  async function togglePanelCollapsed() {
+    panelCollapsed = !panelCollapsed;
+    renderPanelCollapsedState();
+    await savePanelState();
+  }
+
+  function setSearchRunning(isRunning) {
+    if (searchButton) {
+      searchButton.disabled = isRunning;
+    }
+    if (continueButton) {
+      continueButton.disabled = isRunning || !sessionState.hasStarted;
+    }
+    if (stopButton) {
+      stopButton.disabled = !isRunning;
+    }
+  }
+
+  function clearTargetHighlight() {
+    for (const card of cardState.keys()) {
+      card.classList.remove("dlf-target");
     }
   }
 
@@ -294,14 +420,10 @@
     return shouldShow;
   }
 
-  function clearTargetHighlight() {
-    for (const card of cardState.keys()) {
-      card.classList.remove("dlf-target");
-    }
-  }
-
-  function getDistanceDays(distance) {
-    return Math.round(distance / 86400000);
+  function getAnchorNodes() {
+    return Array.from(
+      document.querySelectorAll('a[href*="/video/"], a[href*="modal_id="], a[href*="aweme_id="]')
+    );
   }
 
   function getCardKey(card, info) {
@@ -312,7 +434,6 @@
     if (!card.dataset.dlfCardKey) {
       card.dataset.dlfCardKey = `card:${Math.random().toString(36).slice(2, 10)}`;
     }
-
     return card.dataset.dlfCardKey;
   }
 
@@ -321,6 +442,7 @@
     const seenCards = new Set();
     let detectedDates = 0;
     let unknownDates = 0;
+
     videoCardIndex.clear();
 
     for (const anchor of anchors) {
@@ -363,11 +485,7 @@
       }
     }
 
-    return {
-      totalCards: cardState.size,
-      detectedDates,
-      unknownDates
-    };
+    return { totalCards: cardState.size, detectedDates, unknownDates };
   }
 
   function enqueueNetworkCandidate(videoId, timestamp) {
@@ -387,12 +505,7 @@
     }
 
     sessionState.networkCandidateIds.add(videoId);
-    sessionState.networkCandidateQueue.push({
-      key,
-      videoId,
-      timestamp,
-      distance
-    });
+    sessionState.networkCandidateQueue.push({ key, videoId, timestamp, distance });
   }
 
   function getBestMatch(targetTimestamp) {
@@ -441,45 +554,31 @@
       }
     }
 
-    const lines = [
-      `已扫描卡片: ${stats.totalCards}`,
-      `可识别发布时间: ${stats.detectedDates}`,
-      `无法识别发布时间: ${stats.unknownDates}`,
-      `目标日期: ${targetTimestamp ? formatDate(targetTimestamp) : "未设置"}`
-    ];
-
-    if (best) {
-      lines.push(`最近发布时间: ${formatDate(best.timestamp)}`);
-      lines.push(`相差天数: ${getDistanceDays(best.distance)} 天`);
-      lines.push(
-        isWithinMatchWindow(best.distance)
-          ? `首轮结果: 已进入 5 天候选范围，等待邻域校验`
-          : `首轮结果: 超出 5 天，请继续查找或重新选择日期`
-      );
+    const lines = [];
+    if (!targetTimestamp) {
+      lines.push("选择年、月、日后，开始自动查找。");
     } else {
-      lines.push("最近发布时间: 暂未找到");
+      lines.push(`目标日期 ${formatDate(targetTimestamp)}`);
+    }
+
+    if (sessionState.currentHighlightedKey) {
+      lines.push("已锁定一个通过校验的候选视频。");
+    } else if (best) {
+      if (isWithinMatchWindow(best.distance)) {
+        lines.push(`发现接近目标日期的候选，当前相差 ${getDistanceDays(best.distance)} 天。`);
+      } else {
+        lines.push(`当前最近的视频发布时间相差 ${getDistanceDays(best.distance)} 天。`);
+      }
+    } else {
+      lines.push("等待页面加载更多喜欢视频。");
     }
 
     updateStatus(lines.concat(extraLines).join("\n"));
     return { stats, best, targetTimestamp };
   }
 
-  function setSearchRunning(isRunning) {
-    if (searchButton) {
-      searchButton.disabled = isRunning;
-    }
-    if (continueButton) {
-      continueButton.disabled = isRunning || !sessionState.hasStarted;
-    }
-    if (stopButton) {
-      stopButton.disabled = !isRunning;
-    }
-  }
-
   function wait(ms) {
-    return new Promise((resolve) => {
-      window.setTimeout(resolve, ms);
-    });
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   function getVisibleRect(element) {
@@ -507,12 +606,6 @@
     }
 
     return element.scrollHeight - element.clientHeight > 120;
-  }
-
-  function getAnchorNodes() {
-    return Array.from(
-      document.querySelectorAll('a[href*="/video/"], a[href*="modal_id="], a[href*="aweme_id="]')
-    );
   }
 
   function getScrollableCandidates() {
@@ -554,25 +647,6 @@
     }
   }
 
-  function describeScrollTarget(target) {
-    if (!target || target === document.scrollingElement) {
-      return "window";
-    }
-
-    const parts = [target.tagName.toLowerCase()];
-    if (target.id) {
-      parts.push(`#${target.id}`);
-    }
-    if (typeof target.className === "string" && target.className.trim()) {
-      const className = target.className.trim().split(/\s+/).slice(0, 2).join(".");
-      if (className) {
-        parts.push(`.${className}`);
-      }
-    }
-
-    return parts.join("");
-  }
-
   function resolveScrollTarget() {
     const candidates = getScrollableCandidates();
     let best = document.scrollingElement || document.documentElement;
@@ -587,7 +661,6 @@
       );
       const visibleBonus = candidate === document.scrollingElement || isVisibleElement(candidate) ? 400 : -400;
       const score = anchorCount * 1000 + scrollRange + visibleBonus;
-
       if (score > bestScore) {
         best = candidate;
         bestScore = score;
@@ -613,10 +686,7 @@
 
   function getScrollHeight(target) {
     if (!target || target === document.scrollingElement) {
-      return Math.max(
-        document.documentElement.scrollHeight || 0,
-        document.body.scrollHeight || 0
-      );
+      return Math.max(document.documentElement.scrollHeight || 0, document.body.scrollHeight || 0);
     }
     return target.scrollHeight;
   }
@@ -653,7 +723,7 @@
         })
       );
     } catch {
-      // Ignore event-construction failures in older runtimes.
+      // Ignore unsupported environments.
     }
   }
 
@@ -682,6 +752,7 @@
 
     setScrollTop(target, nextTop, "auto");
     emitWheelLikeEvents(target, step * direction);
+
     for (let i = 0; i < SEARCH_MAX_WAIT_CYCLES; i += 1) {
       await wait(SEARCH_POLL_MS);
       const afterAnchorCount = getAnchorNodes().length;
@@ -689,6 +760,7 @@
         break;
       }
     }
+
     await wait(Math.max(120, SEARCH_WAIT_MS - SEARCH_POLL_MS * SEARCH_MAX_WAIT_CYCLES));
 
     const afterTop = getScrollTop(target);
@@ -741,15 +813,12 @@
       return null;
     }
 
-    const position = getCardAbsoluteTop(card, scrollTarget);
-    const key = getCardKey(card, info);
-
     return {
       card,
-      key,
+      key: getCardKey(card, info),
       timestamp,
       distance,
-      position,
+      position: getCardAbsoluteTop(card, scrollTarget),
       videoId: info.videoId
     };
   }
@@ -782,8 +851,8 @@
   }
 
   function collectNearbySamples(candidate, scrollTarget) {
-    const timelineEntries = getLoadedTimelineEntries(scrollTarget);
-    const index = timelineEntries.findIndex((entry) => entry.key === candidate.key);
+    const timeline = getLoadedTimelineEntries(scrollTarget);
+    const index = timeline.findIndex((entry) => entry.key === candidate.key);
     if (index === -1) {
       return [];
     }
@@ -792,9 +861,9 @@
     let left = index - 1;
     let right = index + 1;
 
-    while (samples.length < NEARBY_SAMPLE_LIMIT && (left >= 0 || right < timelineEntries.length)) {
-      const leftEntry = left >= 0 ? timelineEntries[left] : null;
-      const rightEntry = right < timelineEntries.length ? timelineEntries[right] : null;
+    while (samples.length < NEARBY_SAMPLE_LIMIT && (left >= 0 || right < timeline.length)) {
+      const leftEntry = left >= 0 ? timeline[left] : null;
+      const rightEntry = right < timeline.length ? timeline[right] : null;
       const leftGap = leftEntry ? Math.abs(candidate.position - leftEntry.position) : Number.POSITIVE_INFINITY;
       const rightGap = rightEntry ? Math.abs(rightEntry.position - candidate.position) : Number.POSITIVE_INFINITY;
 
@@ -821,8 +890,7 @@
         passed: false,
         sampleCount: 0,
         averageTimestamp: null,
-        averageDistance: Number.POSITIVE_INFINITY,
-        reason: "附近没有可用的视频日期样本"
+        averageDistance: Number.POSITIVE_INFINITY
       };
     }
 
@@ -834,11 +902,7 @@
       passed: averageDistance <= NEARBY_AVERAGE_WINDOW_MS,
       sampleCount: nearbySamples.length,
       averageTimestamp,
-      averageDistance,
-      reason:
-        averageDistance <= NEARBY_AVERAGE_WINDOW_MS
-          ? "邻域平均时间接近当前候选"
-          : "邻域平均时间与当前候选偏差过大"
+      averageDistance
     };
   }
 
@@ -858,7 +922,6 @@
       if (candidate.position <= afterPosition + 24) {
         continue;
       }
-
       if (sessionState.visitedKeys.has(candidate.key)) {
         continue;
       }
@@ -950,7 +1013,6 @@
       if (candidate.position <= sessionState.lastSuggestedPosition + 24) {
         continue;
       }
-
       if (sessionState.visitedKeys.has(candidate.key) || queuedKeys.has(candidate.key)) {
         continue;
       }
@@ -993,6 +1055,18 @@
     };
   }
 
+  function stopSearchInternal({ message = "", refresh = true } = {}) {
+    if (searchState) {
+      searchState.running = false;
+    }
+    setSearchRunning(false);
+    if (refresh) {
+      refreshStatus(message ? [message] : []);
+    } else if (message) {
+      updateStatus(message);
+    }
+  }
+
   async function runCandidateSearch({ resetToTop }) {
     if (!updateContextVisibility()) {
       updateStatus("当前不在喜欢列表页，插件已隐藏。请先回到个人主页的喜欢列表。");
@@ -1001,11 +1075,11 @@
 
     const targetTimestamp = getTargetTimestamp();
     if (!targetTimestamp) {
-      updateStatus("请先选择目标日期。");
+      updateStatus("请选择完整的年、月、日后再开始查找。");
       return;
     }
 
-    await saveTargetDate();
+    await savePanelState();
     if (searchState?.running) {
       return;
     }
@@ -1021,10 +1095,9 @@
       timedOut: false
     };
     setSearchRunning(true);
+
     refreshStatus([
-      resetToTop
-        ? "正在从顶部开始搜索候选视频..."
-        : "正在继续向后搜索下一个候选视频..."
+      resetToTop ? "正在从顶部自动查找更接近这个日期的候选视频..." : "继续从当前位置往后自动查找..."
     ]);
 
     try {
@@ -1039,17 +1112,11 @@
         resetSession(scrollTarget);
         await resetSearchStartPosition(scrollTarget);
         sessionState.hasStarted = true;
-        refreshStatus([
-          `滚动容器: ${describeScrollTarget(scrollTarget)}`,
-          "已自动回到列表顶部，开始搜索候选视频..."
-        ]);
+        refreshStatus(["已回到喜欢列表顶部，开始自动查找。"]);
       } else {
         await primeAutoLoading(scrollTarget);
         sessionState.hasStarted = true;
-        refreshStatus([
-          `滚动容器: ${describeScrollTarget(scrollTarget)}`,
-          "继续搜索下一个候选视频..."
-        ]);
+        refreshStatus(["继续从当前位置往后找下一个候选。"]);
       }
 
       while (searchState.running) {
@@ -1062,61 +1129,36 @@
         const candidate =
           takeNextNetworkCandidate(targetTimestamp, searchState.scrollTarget) ||
           takeNextQueuedCandidate() ||
-          findNextCandidate(
-            targetTimestamp,
-            searchState.scrollTarget,
-            sessionState.lastSuggestedPosition
-          );
+          findNextCandidate(targetTimestamp, searchState.scrollTarget, sessionState.lastSuggestedPosition);
 
         if (candidate) {
           const validation = validateCandidateByNeighborhood(candidate, searchState.scrollTarget);
-
           sessionState.visitedKeys.add(candidate.key);
           sessionState.lastSuggestedPosition = candidate.position;
           sessionState.hasStarted = true;
 
           if (validation.passed) {
             sessionState.currentHighlightedKey = candidate.key;
-
             clearTargetHighlight();
             candidate.card.classList.add("dlf-target");
             scrollCardIntoView(candidate.card);
             refreshStatus([
-              `滚动容器: ${describeScrollTarget(searchState.scrollTarget)}`,
-              `已定位候选视频: ${formatDate(candidate.timestamp)}`,
-              `与目标日期相差: ${getDistanceDays(candidate.distance)} 天`,
-              `邻域样本数: ${validation.sampleCount} 个`,
-              `邻域平均日期: ${validation.averageTimestamp ? formatDate(validation.averageTimestamp) : "无"}`,
-              `邻域平均差: ${Number.isFinite(validation.averageDistance) ? getDistanceDays(validation.averageDistance) : "-"} 天`,
-              `已缓存候选: ${sessionState.candidateQueue.length} 个`,
-              `网络候选: ${sessionState.networkCandidateQueue.length} 个`,
-              "邻域校验已通过，已高亮当前视频。"
+              `已找到更可信的候选视频：${formatDate(candidate.timestamp)}`,
+              `与目标日期相差 ${getDistanceDays(candidate.distance)} 天，邻域校验已通过。`
             ]);
             return;
           }
 
           sessionState.currentHighlightedKey = null;
           refreshStatus([
-            `滚动容器: ${describeScrollTarget(searchState.scrollTarget)}`,
-            `候选未通过邻域校验: ${formatDate(candidate.timestamp)}`,
-            `邻域样本数: ${validation.sampleCount} 个`,
-            `邻域平均日期: ${validation.averageTimestamp ? formatDate(validation.averageTimestamp) : "无"}`,
-            `邻域平均差: ${Number.isFinite(validation.averageDistance) ? getDistanceDays(validation.averageDistance) : "-"} 天`,
-            "当前候选可能不对应你的点赞时期，继续自动查找..."
+            `跳过 ${formatDate(candidate.timestamp)}，它周围的视频时间分布不够稳定。`,
+            "继续自动查找下一个更可信的候选。"
           ]);
         }
 
         searchState.steps += 1;
-
         const scrollResult = await scrollSearchTarget(searchState.scrollTarget, 1);
-
-        const { stats } = refreshStatus([
-          `滚动容器: ${describeScrollTarget(searchState.scrollTarget)}`,
-          `已自动扫描: ${searchState.steps} 轮`,
-          `已缓存候选: ${sessionState.candidateQueue.length} 个`,
-          `网络候选: ${sessionState.networkCandidateQueue.length} 个`,
-          "快速扫描中..."
-        ]);
+        const { stats } = refreshStatus(["正在自动向下查找，请稍等..."]);
 
         if (stats.totalCards > searchState.lastCardCount) {
           searchState.lastCardCount = stats.totalCards;
@@ -1149,19 +1191,11 @@
         return;
       }
 
-      const finalLines = [
-        `滚动容器: ${describeScrollTarget(searchState.scrollTarget)}`,
-        `已缓存候选: ${sessionState.candidateQueue.length} 个`,
-        `网络候选: ${sessionState.networkCandidateQueue.length} 个`
-      ];
-
       if (searchState.timedOut) {
-        finalLines.push("搜索时间较长，已自动停止。你可以点击“继续查找”从当前位置继续。");
+        refreshStatus(["搜索时间有点长，已自动暂停。点击“继续查找”可以从当前位置接着找。"]);
       } else {
-        finalLines.push("没有找到新的候选视频。请重新选择日期，或稍后从别的位置再试。");
+        refreshStatus(["后面暂时没有找到更可信的候选视频。可以换个日期，或者继续往后找。"]);
       }
-
-      refreshStatus(finalLines);
     } finally {
       if (searchState) {
         searchState.running = false;
@@ -1180,7 +1214,7 @@
     }
 
     if (!sessionState.hasStarted && sessionState.lastSuggestedPosition === -Infinity) {
-      updateStatus("请先点击“查找并跳转”，开始一次搜索。");
+      updateStatus("先点击一次“开始查找”，插件才知道从哪里继续。");
       return;
     }
 
@@ -1209,34 +1243,93 @@
     panel.id = PANEL_ID;
     panel.className = "dlf-panel";
     panel.innerHTML = `
+      <div class="dlf-panel__particles" aria-hidden="true">
+        <span class="dlf-particle dlf-particle--1"></span>
+        <span class="dlf-particle dlf-particle--2"></span>
+        <span class="dlf-particle dlf-particle--3"></span>
+        <span class="dlf-particle dlf-particle--4"></span>
+        <span class="dlf-particle dlf-particle--5"></span>
+        <span class="dlf-particle dlf-particle--6"></span>
+      </div>
+      <button type="button" class="dlf-panel__toggle" id="dlf-toggle">收起</button>
       <div class="dlf-panel__body">
-        <h2 class="dlf-panel__title">Douyin Like Navigator</h2>
-        <p class="dlf-panel__desc">
-          选择一个目标日期后，插件会自动向下滚动喜欢列表，并尝试定位发布时间落在目标日期前后 5 天内的视频。
-        </p>
-        <div class="dlf-panel__field">
-          <span>目标日期</span>
-          <input type="date" id="dlf-target-date" />
+        <div class="dlf-panel__eyebrow">Like Date Finder</div>
+        <h2 class="dlf-panel__title">喜欢日期导航</h2>
+        <p class="dlf-panel__desc">选一个你想回到的日期，让插件在喜欢列表里自动往下找。</p>
+        <div class="dlf-panel__date-stage">
+          <div class="dlf-panel__glow-ring"></div>
+          <div class="dlf-panel__date-head">
+            <span class="dlf-panel__label">目标日期</span>
+            <span class="dlf-panel__hint">年 / 月 / 日 分开选，更顺手</span>
+          </div>
+          <div class="dlf-panel__picker-row">
+            <label class="dlf-picker">
+              <span class="dlf-picker__tag">年</span>
+              <select id="dlf-year"></select>
+            </label>
+            <label class="dlf-picker">
+              <span class="dlf-picker__tag">月</span>
+              <select id="dlf-month"></select>
+            </label>
+            <label class="dlf-picker">
+              <span class="dlf-picker__tag">日</span>
+              <select id="dlf-day"></select>
+            </label>
+          </div>
+          <input type="hidden" id="dlf-target-date" />
         </div>
         <div class="dlf-panel__actions">
-          <button type="button" class="dlf-btn--primary" id="dlf-jump">查找并跳转</button>
-          <button type="button" class="dlf-btn--secondary" id="dlf-continue" disabled>继续查找</button>
+          <button type="button" class="dlf-btn dlf-btn--primary" id="dlf-jump">开始查找</button>
+          <button type="button" class="dlf-btn dlf-btn--ghost" id="dlf-continue" disabled>继续查找</button>
         </div>
         <div class="dlf-panel__actions">
-          <button type="button" class="dlf-btn--secondary" id="dlf-stop" disabled>停止</button>
+          <button type="button" class="dlf-btn dlf-btn--secondary" id="dlf-stop" disabled>停止查找</button>
         </div>
-        <div class="dlf-panel__status" id="dlf-status">等待喜欢列表加载中...</div>
+        <div class="dlf-panel__status" id="dlf-status">选择一个日期后开始自动查找。</div>
       </div>
     `;
 
     document.body.appendChild(panel);
     panelReady = true;
 
+    panelBodyNode = panel.querySelector(".dlf-panel__body");
     statusNode = panel.querySelector("#dlf-status");
     targetInput = panel.querySelector("#dlf-target-date");
+    yearSelect = panel.querySelector("#dlf-year");
+    monthSelect = panel.querySelector("#dlf-month");
+    daySelect = panel.querySelector("#dlf-day");
+    collapseButton = panel.querySelector("#dlf-toggle");
     searchButton = panel.querySelector("#dlf-jump");
     continueButton = panel.querySelector("#dlf-continue");
     stopButton = panel.querySelector("#dlf-stop");
+
+    populateYearSelect();
+    populateMonthSelect();
+    populateDaySelect(1);
+
+    collapseButton?.addEventListener("click", () => {
+      togglePanelCollapsed().catch((error) => {
+        console.error("[Douyin Like Filter] toggle failed", error);
+      });
+    });
+
+    yearSelect?.addEventListener("change", () => {
+      handleDateSelectionChange().catch((error) => {
+        console.error("[Douyin Like Filter] year change failed", error);
+      });
+    });
+
+    monthSelect?.addEventListener("change", () => {
+      handleDateSelectionChange().catch((error) => {
+        console.error("[Douyin Like Filter] month change failed", error);
+      });
+    });
+
+    daySelect?.addEventListener("change", () => {
+      handleDateSelectionChange().catch((error) => {
+        console.error("[Douyin Like Filter] day change failed", error);
+      });
+    });
 
     searchButton?.addEventListener("click", () => {
       jumpToClosestVideo().catch((error) => {
@@ -1321,7 +1414,6 @@
       }
 
       lastPageEventTick += 1;
-
       if (newEntries > 0) {
         queueRescan();
       }
@@ -1333,7 +1425,8 @@
     bindEvents();
     createPanel();
     bindNavigationEvents();
-    await restoreTargetDate();
+    await restorePanelState();
+    renderPanelCollapsedState();
     observePage();
     updateContextVisibility();
     refreshStatus();
