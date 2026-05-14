@@ -280,6 +280,12 @@
     0 0 0 4px rgba(71, 212, 255, 0.08);
 }
 
+.dlf-picker select option {
+  color: #ecfeff;
+  background: #0a2234;
+  font: 600 16px/1.4 "Segoe UI", "Noto Sans SC", sans-serif;
+}
+
 .dlf-panel__actions {
   display: flex;
   gap: 10px;

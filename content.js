@@ -3,16 +3,20 @@
   const STORAGE_KEY = "douyin-like-filter-target-date";
   const PAGE_EVENT = "douyin-like-filter:data";
   const SEARCH_STEP_PX = 4200;
-  const SEARCH_IDLE_LIMIT = 4;
+  const SEARCH_IDLE_LIMIT = 10;
   const SEARCH_WAIT_MS = 900;
   const SEARCH_POLL_MS = 120;
   const SEARCH_MAX_WAIT_CYCLES = 8;
-  const SEARCH_MAX_DURATION_MS = 180000;
+  const SEARCH_MAX_DURATION_MS = 900000;
+  const SEARCH_BOTTOM_CONFIRMATIONS = 3;
+  const SEARCH_STALL_RECOVERY_LIMIT = 4;
   const MATCH_WINDOW_DAYS = 5;
   const MATCH_WINDOW_MS = MATCH_WINDOW_DAYS * 24 * 60 * 60 * 1000;
   const NEARBY_SAMPLE_LIMIT = 10;
-  const NEARBY_AVERAGE_WINDOW_DAYS = 15;
+  const NEARBY_AVERAGE_WINDOW_DAYS = 10;
   const NEARBY_AVERAGE_WINDOW_MS = NEARBY_AVERAGE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const DATE_WARNING_WINDOW_DAYS = 365;
+  const DATE_WARNING_WINDOW_MS = DATE_WARNING_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
   const awemeTimeMap = new Map();
   const cardState = new Map();
@@ -235,6 +239,16 @@
     }
     const timestamp = new Date(`${targetInput.value}T00:00:00`).getTime();
     return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  function shouldWarnForFarTargetDate(targetTimestamp) {
+    if (!targetTimestamp) {
+      return false;
+    }
+
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    return Math.abs(todayStart - targetTimestamp) > DATE_WARNING_WINDOW_MS;
   }
 
   function applyDateValue(value) {
@@ -775,6 +789,7 @@
     return {
       beforeTop: currentTop,
       afterTop: getScrollTop(target),
+      moved: Math.abs(getScrollTop(target) - currentTop),
       reachedBottom: getScrollTop(target) >= getMaxScrollTop(target) - 8
     };
   }
@@ -785,6 +800,19 @@
     await primeAutoLoading(target);
     setScrollTop(target, 0, "auto");
     await wait(500);
+  }
+
+  async function recoverStalledSearch(target) {
+    const currentTop = getScrollTop(target);
+    const clientHeight = getClientHeight(target);
+    const jumpStep = Math.max(1200, Math.floor(clientHeight * 1.35));
+
+    await primeAutoLoading(target);
+    setScrollTop(target, currentTop + jumpStep, "auto");
+    emitWheelLikeEvents(target, jumpStep);
+    await wait(650);
+
+    return getScrollTop(target);
   }
 
   function scrollCardIntoView(card) {
@@ -883,7 +911,7 @@
     return samples;
   }
 
-  function validateCandidateByNeighborhood(candidate, scrollTarget) {
+  function validateCandidateByNeighborhood(candidate, scrollTarget, targetTimestamp) {
     const nearbySamples = collectNearbySamples(candidate, scrollTarget);
     if (nearbySamples.length === 0) {
       return {
@@ -896,7 +924,7 @@
 
     const averageTimestamp =
       nearbySamples.reduce((sum, sample) => sum + sample.timestamp, 0) / nearbySamples.length;
-    const averageDistance = Math.abs(averageTimestamp - candidate.timestamp);
+    const averageDistance = Math.abs(averageTimestamp - targetTimestamp);
 
     return {
       passed: averageDistance <= NEARBY_AVERAGE_WINDOW_MS,
@@ -1079,6 +1107,16 @@
       return;
     }
 
+    if (resetToTop && shouldWarnForFarTargetDate(targetTimestamp)) {
+      const confirmed = window.confirm(
+        `你选择的目标日期 ${formatDate(targetTimestamp)} 与今天相差超过一年。\n\n请确认这不是填错日期。如果确认无误，点击“确定”继续查找。`
+      );
+      if (!confirmed) {
+        updateStatus("已取消搜索。你可以重新确认一下目标日期。");
+        return;
+      }
+    }
+
     await savePanelState();
     if (searchState?.running) {
       return;
@@ -1089,6 +1127,8 @@
       running: true,
       lastCardCount: cardState.size,
       idleRounds: 0,
+      bottomHits: 0,
+      stallRecoveries: 0,
       steps: 0,
       scrollTarget: null,
       startedAt: Date.now(),
@@ -1132,7 +1172,11 @@
           findNextCandidate(targetTimestamp, searchState.scrollTarget, sessionState.lastSuggestedPosition);
 
         if (candidate) {
-          const validation = validateCandidateByNeighborhood(candidate, searchState.scrollTarget);
+          const validation = validateCandidateByNeighborhood(
+            candidate,
+            searchState.scrollTarget,
+            targetTimestamp
+          );
           sessionState.visitedKeys.add(candidate.key);
           sessionState.lastSuggestedPosition = candidate.position;
           sessionState.hasStarted = true;
@@ -1163,8 +1207,20 @@
         if (stats.totalCards > searchState.lastCardCount) {
           searchState.lastCardCount = stats.totalCards;
           searchState.idleRounds = 0;
+          searchState.bottomHits = 0;
+          searchState.stallRecoveries = 0;
         } else {
           searchState.idleRounds += 1;
+        }
+
+        if (scrollResult.moved < 24 && searchState.stallRecoveries < SEARCH_STALL_RECOVERY_LIMIT) {
+          searchState.stallRecoveries += 1;
+          const recoveredTop = await recoverStalledSearch(searchState.scrollTarget);
+          if (recoveredTop > scrollResult.afterTop + 24) {
+            searchState.idleRounds = Math.max(0, searchState.idleRounds - 1);
+            searchState.bottomHits = 0;
+            continue;
+          }
         }
 
         if (searchState.idleRounds >= 2) {
@@ -1173,15 +1229,30 @@
             searchState.scrollTarget = newTarget;
             sessionState.scrollTarget = newTarget;
             searchState.idleRounds = 0;
+            searchState.bottomHits = 0;
             await primeAutoLoading(searchState.scrollTarget);
           }
         }
 
-        if (scrollResult.reachedBottom && searchState.idleRounds >= 1) {
+        if (scrollResult.reachedBottom) {
+          searchState.bottomHits += 1;
+        } else {
+          searchState.bottomHits = 0;
+        }
+
+        if (
+          searchState.bottomHits >= SEARCH_BOTTOM_CONFIRMATIONS &&
+          searchState.idleRounds >= 3 &&
+          sessionState.candidateQueue.length === 0 &&
+          sessionState.networkCandidateQueue.length === 0
+        ) {
           break;
         }
 
-        if (searchState.idleRounds >= SEARCH_IDLE_LIMIT) {
+        if (
+          searchState.idleRounds >= SEARCH_IDLE_LIMIT &&
+          searchState.stallRecoveries >= SEARCH_STALL_RECOVERY_LIMIT
+        ) {
           break;
         }
       }
