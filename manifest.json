@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Douyin Like Navigator",
+  "version": "0.1.0",
+  "description": "Jump to the liked video whose publish date is closest to a chosen date.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.douyin.com/*"
+  ],
+  "action": {
+    "default_title": "Douyin Like Navigator",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.douyin.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "page-hook.js"
+      ],
+      "matches": [
+        "https://www.douyin.com/*"
+      ]
+    }
+  ]
+}
