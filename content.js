@@ -17,6 +17,7 @@
   const NEARBY_AVERAGE_WINDOW_MS = NEARBY_AVERAGE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
   const DATE_WARNING_WINDOW_DAYS = 365;
   const DATE_WARNING_WINDOW_MS = DATE_WARNING_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const VIDEO_OPEN_INTENT_TTL_MS = 12000;
 
   const awemeTimeMap = new Map();
   const cardState = new Map();
@@ -38,6 +39,10 @@
   let searchState = null;
   let lastRouteSignature = "";
   let panelCollapsed = false;
+  let playbackState = {
+    lastOpenIntentAt: 0,
+    lastOpenIntentVideoId: null
+  };
 
   let sessionState = {
     scrollTarget: null,
@@ -122,6 +127,29 @@
     }
 
     return null;
+  }
+
+  function getVideoAnchorFromNode(node) {
+    if (!(node instanceof Element)) {
+      return null;
+    }
+    return node.closest('a[href*="/video/"], a[href*="modal_id="], a[href*="aweme_id="]');
+  }
+
+  function noteVideoOpenIntent(node) {
+    const anchor = getVideoAnchorFromNode(node);
+    if (!anchor) {
+      return false;
+    }
+
+    const href = anchor.getAttribute("href") || anchor.href || "";
+    playbackState.lastOpenIntentAt = Date.now();
+    playbackState.lastOpenIntentVideoId = extractVideoId(href);
+    return true;
+  }
+
+  function hasRecentVideoOpenIntent() {
+    return Date.now() - playbackState.lastOpenIntentAt <= VIDEO_OPEN_INTENT_TTL_MS;
   }
 
   function findCardRoot(anchor) {
@@ -325,15 +353,276 @@
     return (element.textContent || "").replace(/\s+/g, " ").trim();
   }
 
-  function isLikeTabText(text) {
-    return /喜欢|赞过/.test(text);
+  function isSupportedProfileTabText(text) {
+    return /作品|推荐|收藏|喜欢|赞过/.test(text);
+  }
+
+  function isLargeVisibleVideoElement(element) {
+    if (!(element instanceof HTMLVideoElement)) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const minWidth = Math.min(260, window.innerWidth * 0.22);
+    const minHeight = window.innerHeight * 0.35;
+    if (rect.width < minWidth || rect.height < minHeight) {
+      return false;
+    }
+
+    return rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
+  }
+
+  function getVisibleVideoMetrics(element) {
+    if (!(element instanceof HTMLVideoElement)) {
+      return null;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const visible =
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      rect.top < window.innerHeight &&
+      rect.left < window.innerWidth &&
+      rect.width >= 160 &&
+      rect.height >= 220;
+
+    if (!visible) {
+      return null;
+    }
+
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    return {
+      rect,
+      centerX,
+      centerY,
+      nearViewportCenter:
+        Math.abs(centerX - window.innerWidth / 2) <= window.innerWidth * 0.22 &&
+        Math.abs(centerY - window.innerHeight / 2) <= window.innerHeight * 0.28
+    };
+  }
+
+  function isDocumentInPlaybackMode() {
+    const bodyStyle = window.getComputedStyle(document.body);
+    const htmlStyle = window.getComputedStyle(document.documentElement);
+    return /hidden|clip/.test(bodyStyle.overflow || "") || /hidden|clip/.test(htmlStyle.overflow || "");
+  }
+
+  function hasPlaybackSceneContainer(element) {
+    let current = element;
+    let depth = 0;
+
+    while (current?.parentElement && depth < 10) {
+      current = current.parentElement;
+      depth += 1;
+
+      const rect = current.getBoundingClientRect?.();
+      if (!rect || rect.width < 180 || rect.height < 260) {
+        continue;
+      }
+
+      const style = window.getComputedStyle(current);
+      const fingerprint = [
+        current.className || "",
+        current.id || "",
+        current.getAttribute("data-e2e") || "",
+        current.getAttribute("data-testid") || ""
+      ].join(" ");
+      const hasPlaybackSignals = /video|player|detail|aweme|feed|modal|dialog|swiper/i.test(fingerprint);
+      const centeredEnough =
+        rect.left <= window.innerWidth * 0.38 &&
+        rect.right >= window.innerWidth * 0.62 &&
+        rect.top <= window.innerHeight * 0.32 &&
+        rect.bottom >= window.innerHeight * 0.68;
+      const stageSized =
+        rect.width >= Math.min(280, window.innerWidth * 0.26) &&
+        rect.height >= window.innerHeight * 0.34;
+      const overlayish = /fixed|sticky/.test(style.position) || (style.zIndex !== "auto" && Number(style.zIndex) >= 8);
+
+      if (hasPlaybackSignals && stageSized && (centeredEnough || overlayish || hasRecentVideoOpenIntent())) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function hasPlaybackOverlayContainer(element) {
+    let current = element;
+    let depth = 0;
+
+    while (current?.parentElement && depth < 8) {
+      current = current.parentElement;
+      depth += 1;
+
+      const rect = current.getBoundingClientRect?.();
+      if (!rect) {
+        continue;
+      }
+
+      const style = window.getComputedStyle(current);
+      const hasDialogSignals =
+        current.getAttribute("role") === "dialog" ||
+        current.getAttribute("aria-modal") === "true" ||
+        /modal|dialog|detail|overlay|player/i.test(current.className || "");
+      const isOverlayLike =
+        /fixed|sticky/.test(style.position) ||
+        (style.zIndex !== "auto" && Number(style.zIndex) >= 10);
+      const coversViewport =
+        rect.width >= window.innerWidth * 0.45 &&
+        rect.height >= window.innerHeight * 0.45;
+
+      if (coversViewport && (hasDialogSignals || isOverlayLike || isDocumentInPlaybackMode())) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isViewportFocusedPlayback(element) {
+    if (!(element instanceof HTMLVideoElement)) {
+      return false;
+    }
+
+    const metrics = getVisibleVideoMetrics(element);
+    if (!metrics) {
+      return false;
+    }
+
+    const { rect } = metrics;
+    const coversEnoughViewport =
+      rect.width >= Math.min(260, window.innerWidth * 0.22) &&
+      rect.height >= window.innerHeight * 0.45;
+    const centeredEnough =
+      rect.left <= window.innerWidth * 0.38 &&
+      rect.right >= window.innerWidth * 0.62 &&
+      rect.top <= window.innerHeight * 0.25 &&
+      rect.bottom >= window.innerHeight * 0.75;
+
+    return coversEnoughViewport && centeredEnough;
+  }
+
+  function isSingleCenteredPlayback(videoElements) {
+    if (videoElements.length !== 1) {
+      return false;
+    }
+
+    const metrics = getVisibleVideoMetrics(videoElements[0]);
+    if (!metrics) {
+      return false;
+    }
+
+    const { rect, nearViewportCenter } = metrics;
+    return (
+      nearViewportCenter &&
+      rect.height >= window.innerHeight * 0.42 &&
+      rect.width >= Math.min(220, window.innerWidth * 0.2)
+    );
+  }
+
+  function getDominantVisibleVideo(visibleVideos) {
+    const candidates = visibleVideos
+      .map((video) => {
+        const metrics = getVisibleVideoMetrics(video);
+        if (!metrics) {
+          return null;
+        }
+        return {
+          video,
+          metrics,
+          area: metrics.rect.width * metrics.rect.height
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.area - left.area);
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const largest = candidates[0];
+    const secondArea = candidates[1]?.area || 0;
+    return {
+      ...largest,
+      totalVisible: candidates.length,
+      areaRatio: secondArea > 0 ? largest.area / secondArea : Infinity
+    };
+  }
+
+  function hasFocusedPlaybackSurface(visibleVideos) {
+    const dominant = getDominantVisibleVideo(visibleVideos);
+    if (!dominant) {
+      return false;
+    }
+
+    const { rect, nearViewportCenter } = dominant.metrics;
+    const stageSized =
+      rect.width >= Math.min(260, window.innerWidth * 0.22) &&
+      rect.height >= window.innerHeight * 0.34;
+    const centeredEnough =
+      nearViewportCenter ||
+      (rect.left <= window.innerWidth * 0.42 &&
+        rect.right >= window.innerWidth * 0.58 &&
+        rect.top <= window.innerHeight * 0.28 &&
+        rect.bottom >= window.innerHeight * 0.72);
+    const dominantEnough = dominant.totalVisible === 1 || dominant.areaRatio >= 1.6;
+
+    return stageSized && centeredEnough && dominantEnough;
+  }
+
+  function hasVideoPlaybackOverlay() {
+    const videos = Array.from(document.querySelectorAll("video"));
+    const visibleVideos = videos.filter((video) => getVisibleVideoMetrics(video));
+
+    if (visibleVideos.length === 0) {
+      return false;
+    }
+
+    if (isDocumentInPlaybackMode() && visibleVideos.length >= 1) {
+      return true;
+    }
+
+    if (isSingleCenteredPlayback(visibleVideos)) {
+      return true;
+    }
+
+    if (hasFocusedPlaybackSurface(visibleVideos) && (hasRecentVideoOpenIntent() || visibleVideos.length <= 2)) {
+      return true;
+    }
+
+    for (const video of visibleVideos) {
+      if (!isLargeVisibleVideoElement(video) && !isViewportFocusedPlayback(video)) {
+        continue;
+      }
+
+      if (hasPlaybackOverlayContainer(video) || hasPlaybackSceneContainer(video) || isViewportFocusedPlayback(video)) {
+        return true;
+      }
+    }
+
+    const overlaySelectors = [
+      '[role="dialog"] video',
+      '[aria-modal="true"] video',
+      '[class*="modal"] video',
+      '[class*="detail"] video',
+      '[class*="overlay"] video',
+      '[class*="player"] video'
+    ];
+
+    return overlaySelectors.some((selector) => {
+      const node = document.querySelector(selector);
+      return node instanceof HTMLVideoElement && isLargeVisibleVideoElement(node);
+    });
   }
 
   function isVideoDetailRoute() {
     return (
       /\/video\/\d+/.test(window.location.pathname) ||
       /(?:\?|&)modal_id=\d+/.test(window.location.search) ||
-      /(?:\?|&)aweme_id=\d+/.test(window.location.search)
+      /(?:\?|&)aweme_id=\d+/.test(window.location.search) ||
+      hasVideoPlaybackOverlay()
     );
   }
 
@@ -341,7 +630,7 @@
     return /\/user\//.test(window.location.pathname);
   }
 
-  function hasActiveLikeTab() {
+  function hasActiveSupportedProfileTab() {
     const selectors = [
       '[role="tab"][aria-selected="true"]',
       '[aria-selected="true"]',
@@ -357,23 +646,23 @@
       const nodes = Array.from(document.querySelectorAll(selector));
       for (const node of nodes) {
         const text = getCompactText(node);
-        if (isVisibleText(text) && isLikeTabText(text)) {
+        if (isVisibleText(text) && isSupportedProfileTabText(text)) {
           return true;
         }
       }
     }
 
-    return /(?:\?|&)(?:tab|showTab)=(?:like|likes|favorite|favourite)/i.test(window.location.search);
+    return /(?:\?|&)(?:tab|showTab)=(?:like|likes|favorite|favourite|collect|collection|works|post|posts|recommend|recommendation)/i.test(window.location.search);
   }
 
-  function isLikesListContext() {
+  function isSupportedProfileListContext() {
     if (!isUserProfileRoute()) {
       return false;
     }
     if (isVideoDetailRoute()) {
       return false;
     }
-    return hasActiveLikeTab();
+    return hasActiveSupportedProfileTab();
   }
 
   function getPanelNode() {
@@ -425,7 +714,7 @@
   }
 
   function updateContextVisibility() {
-    const shouldShow = isLikesListContext();
+    const shouldShow = isSupportedProfileListContext();
     applyPanelVisibility(shouldShow);
 
     const routeSignature = `${window.location.pathname}${window.location.search}`;
@@ -592,7 +881,7 @@
     } else if (best) {
       lines.push(`当前最近的视频发布时间相差 ${getDistanceDays(best.distance)} 天。`);
     } else {
-      lines.push("等待页面加载更多喜欢视频。");
+      lines.push("等待页面加载更多内容。");
     }
 
     updateStatus(lines.concat(extraLines).join(" "));
@@ -1111,7 +1400,7 @@
 
   async function runCandidateSearch({ resetToTop }) {
     if (!updateContextVisibility()) {
-      updateStatus("当前不在喜欢列表页，插件已隐藏。请先回到个人主页的喜欢列表。");
+      updateStatus("当前不在作品、推荐、收藏或喜欢列表页，插件已隐藏。请先回到个人主页的这些列表中。");
       return;
     }
 
@@ -1182,20 +1471,20 @@
         await resetSearchStartPosition(scrollTarget);
         sessionState.hasStarted = true;
         sessionState.lastTargetTimestamp = targetTimestamp;
-        refreshStatus(["已回到喜欢列表顶部，开始自动查找。"]);
+        refreshStatus(["已回到当前列表顶部，开始自动查找。"]);
       } else if (resetToTop && shouldSearchUpward) {
         const upwardBoundary = getScrollTop(scrollTarget) + Math.floor(getClientHeight(scrollTarget) * 0.5);
         resetSession(scrollTarget, upwardBoundary, -1);
         sessionState.hasStarted = true;
         sessionState.lastTargetTimestamp = targetTimestamp;
         await primeAutoLoading(scrollTarget);
-        refreshStatus(["从当前位置开始向上查找更晚日期对应的视频。"]);
+        refreshStatus(["从当前位置开始向上查找更晚日期对应的内容。"]);
       } else {
         resetSession(scrollTarget, sessionState.lastSuggestedPosition, sessionState.searchDirection || 1);
         sessionState.lastTargetTimestamp = targetTimestamp;
         await primeAutoLoading(scrollTarget);
         sessionState.hasStarted = true;
-        refreshStatus(["继续从当前位置往后找下一个候选。"]);
+        refreshStatus(["继续从当前位置往后找下一个候选内容。"]);
       }
 
       while (searchState.running) {
@@ -1396,10 +1685,10 @@
         <span class="dlf-particle dlf-particle--6"></span>
       </div>
       <button type="button" class="dlf-panel__toggle" id="dlf-toggle">收起</button>
-      <div class="dlf-panel__body">
-        <div class="dlf-panel__eyebrow">Like Date Finder</div>
-        <h2 class="dlf-panel__title">喜欢日期导航</h2>
-        <p class="dlf-panel__desc">选一个你想回到的日期，让插件在喜欢列表里自动往下找。</p>
+        <div class="dlf-panel__body">
+        <div class="dlf-panel__eyebrow">Profile Date Finder</div>
+        <h2 class="dlf-panel__title">主页日期导航</h2>
+        <p class="dlf-panel__desc">选一个你想回到的日期，让插件在作品、推荐、收藏或喜欢列表里自动查找。</p>
         <div class="dlf-panel__date-stage">
           <div class="dlf-panel__glow-ring"></div>
           <div class="dlf-panel__date-head">
@@ -1535,6 +1824,23 @@
   }
 
   function bindEvents() {
+    document.addEventListener(
+      "click",
+      (event) => {
+        if (!noteVideoOpenIntent(event.target)) {
+          return;
+        }
+
+        window.setTimeout(() => {
+          queueRescan();
+        }, 80);
+        window.setTimeout(() => {
+          queueRescan();
+        }, 360);
+      },
+      true
+    );
+
     window.addEventListener(PAGE_EVENT, (event) => {
       const entries = event.detail?.entries;
       if (!Array.isArray(entries)) {
