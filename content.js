@@ -26,7 +26,6 @@
   let panelReady = false;
   let mutationObserver = null;
   let rescanTimer = null;
-  let statusNode = null;
   let panelBodyNode = null;
   let targetInput = null;
   let yearSelect = null;
@@ -43,6 +42,8 @@
   let sessionState = {
     scrollTarget: null,
     lastSuggestedPosition: -Infinity,
+    lastTargetTimestamp: null,
+    searchDirection: 1,
     visitedKeys: new Set(),
     hasStarted: false,
     currentHighlightedKey: null,
@@ -167,8 +168,12 @@
   }
 
   function updateStatus(message) {
-    if (statusNode) {
-      statusNode.textContent = message;
+    const panel = getPanelNode();
+    if (panel) {
+      panel.setAttribute("title", message);
+    }
+    if (message) {
+      console.info("[Douyin Like Filter]", message);
     }
   }
 
@@ -451,6 +456,13 @@
     return card.dataset.dlfCardKey;
   }
 
+  function isCandidateBeyondBoundary(position, boundary, direction) {
+    if (direction < 0) {
+      return position < boundary - 24;
+    }
+    return position > boundary + 24;
+  }
+
   function scanCards() {
     const anchors = getAnchorNodes();
     const seenCards = new Set();
@@ -578,16 +590,12 @@
     if (sessionState.currentHighlightedKey) {
       lines.push("已锁定一个通过校验的候选视频。");
     } else if (best) {
-      if (isWithinMatchWindow(best.distance)) {
-        lines.push(`发现接近目标日期的候选，当前相差 ${getDistanceDays(best.distance)} 天。`);
-      } else {
-        lines.push(`当前最近的视频发布时间相差 ${getDistanceDays(best.distance)} 天。`);
-      }
+      lines.push(`当前最近的视频发布时间相差 ${getDistanceDays(best.distance)} 天。`);
     } else {
       lines.push("等待页面加载更多喜欢视频。");
     }
 
-    updateStatus(lines.concat(extraLines).join("\n"));
+    updateStatus(lines.concat(extraLines).join(" "));
     return { stats, best, targetTimestamp };
   }
 
@@ -802,14 +810,14 @@
     await wait(500);
   }
 
-  async function recoverStalledSearch(target) {
+  async function recoverStalledSearch(target, direction = 1) {
     const currentTop = getScrollTop(target);
     const clientHeight = getClientHeight(target);
     const jumpStep = Math.max(1200, Math.floor(clientHeight * 1.35));
 
     await primeAutoLoading(target);
-    setScrollTop(target, currentTop + jumpStep, "auto");
-    emitWheelLikeEvents(target, jumpStep);
+    setScrollTop(target, currentTop + jumpStep * direction, "auto");
+    emitWheelLikeEvents(target, jumpStep * direction);
     await wait(650);
 
     return getScrollTop(target);
@@ -934,7 +942,7 @@
     };
   }
 
-  function findNextCandidate(targetTimestamp, scrollTarget, afterPosition) {
+  function findNextCandidate(targetTimestamp, scrollTarget, boundaryPosition, direction = 1) {
     const matches = [];
 
     for (const [card, info] of cardState.entries()) {
@@ -947,7 +955,7 @@
         continue;
       }
 
-      if (candidate.position <= afterPosition + 24) {
+      if (!isCandidateBeyondBoundary(candidate.position, boundaryPosition, direction)) {
         continue;
       }
       if (sessionState.visitedKeys.has(candidate.key)) {
@@ -959,7 +967,7 @@
 
     matches.sort((left, right) => {
       if (left.position !== right.position) {
-        return left.position - right.position;
+        return direction < 0 ? right.position - left.position : left.position - right.position;
       }
       return left.distance - right.distance;
     });
@@ -967,7 +975,7 @@
     return matches[0] || null;
   }
 
-  function takeNextNetworkCandidate(targetTimestamp, scrollTarget) {
+  function takeNextNetworkCandidate(targetTimestamp, scrollTarget, boundaryPosition, direction = 1) {
     for (let i = 0; i < sessionState.networkCandidateQueue.length; i += 1) {
       const queued = sessionState.networkCandidateQueue[i];
       if (!queued) {
@@ -998,11 +1006,14 @@
         if (!candidate) {
           continue;
         }
-        if (candidate.position <= sessionState.lastSuggestedPosition + 24) {
+        if (!isCandidateBeyondBoundary(candidate.position, boundaryPosition, direction)) {
           continue;
         }
 
-        if (!bestCandidate || candidate.position < bestCandidate.position) {
+        if (
+          !bestCandidate ||
+          (direction < 0 ? candidate.position > bestCandidate.position : candidate.position < bestCandidate.position)
+        ) {
           bestCandidate = candidate;
         }
       }
@@ -1024,7 +1035,7 @@
     return null;
   }
 
-  function fillCandidateQueue(targetTimestamp, scrollTarget) {
+  function fillCandidateQueue(targetTimestamp, scrollTarget, direction = 1) {
     const queuedKeys = new Set(sessionState.candidateQueue.map((candidate) => candidate.key));
     const freshCandidates = [];
 
@@ -1038,7 +1049,7 @@
         continue;
       }
 
-      if (candidate.position <= sessionState.lastSuggestedPosition + 24) {
+      if (!isCandidateBeyondBoundary(candidate.position, sessionState.lastSuggestedPosition, direction)) {
         continue;
       }
       if (sessionState.visitedKeys.has(candidate.key) || queuedKeys.has(candidate.key)) {
@@ -1050,7 +1061,7 @@
 
     freshCandidates.sort((left, right) => {
       if (left.position !== right.position) {
-        return left.position - right.position;
+        return direction < 0 ? right.position - left.position : left.position - right.position;
       }
       return left.distance - right.distance;
     });
@@ -1070,10 +1081,13 @@
     return null;
   }
 
-  function resetSession(scrollTarget = null) {
+  function resetSession(scrollTarget = null, boundaryPosition = null, direction = 1) {
     sessionState = {
       scrollTarget,
-      lastSuggestedPosition: -Infinity,
+      lastSuggestedPosition:
+        boundaryPosition == null ? (direction < 0 ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY) : boundaryPosition,
+      lastTargetTimestamp: null,
+      searchDirection: direction,
       visitedKeys: new Set(),
       hasStarted: false,
       currentHighlightedKey: null,
@@ -1123,21 +1137,36 @@
     }
 
     scanCards();
+    const currentScrollTarget = sessionState.scrollTarget || resolveScrollTarget();
+    const currentScrollTop = getScrollTop(currentScrollTarget);
+    const shouldSearchUpward =
+      resetToTop &&
+      sessionState.lastTargetTimestamp != null &&
+      targetTimestamp > sessionState.lastTargetTimestamp &&
+      currentScrollTop > getClientHeight(currentScrollTarget) * 1.2;
+    const searchDirection = shouldSearchUpward ? -1 : 1;
+
     searchState = {
       running: true,
       lastCardCount: cardState.size,
       idleRounds: 0,
       bottomHits: 0,
+      topHits: 0,
       stallRecoveries: 0,
       steps: 0,
       scrollTarget: null,
       startedAt: Date.now(),
-      timedOut: false
+      timedOut: false,
+      direction: searchDirection
     };
     setSearchRunning(true);
 
     refreshStatus([
-      resetToTop ? "正在从顶部自动查找更接近这个日期的候选视频..." : "继续从当前位置往后自动查找..."
+      resetToTop
+        ? shouldSearchUpward
+          ? "新的目标日期更靠近现在，正在从当前位置向上查找..."
+          : "正在从顶部自动查找更接近这个日期的候选视频..."
+        : "继续从当前位置往后自动查找..."
     ]);
 
     try {
@@ -1148,12 +1177,22 @@
       searchState.scrollTarget = scrollTarget;
       sessionState.scrollTarget = scrollTarget;
 
-      if (resetToTop) {
-        resetSession(scrollTarget);
+      if (resetToTop && !shouldSearchUpward) {
+        resetSession(scrollTarget, Number.NEGATIVE_INFINITY, 1);
         await resetSearchStartPosition(scrollTarget);
         sessionState.hasStarted = true;
+        sessionState.lastTargetTimestamp = targetTimestamp;
         refreshStatus(["已回到喜欢列表顶部，开始自动查找。"]);
+      } else if (resetToTop && shouldSearchUpward) {
+        const upwardBoundary = getScrollTop(scrollTarget) + Math.floor(getClientHeight(scrollTarget) * 0.5);
+        resetSession(scrollTarget, upwardBoundary, -1);
+        sessionState.hasStarted = true;
+        sessionState.lastTargetTimestamp = targetTimestamp;
+        await primeAutoLoading(scrollTarget);
+        refreshStatus(["从当前位置开始向上查找更晚日期对应的视频。"]);
       } else {
+        resetSession(scrollTarget, sessionState.lastSuggestedPosition, sessionState.searchDirection || 1);
+        sessionState.lastTargetTimestamp = targetTimestamp;
         await primeAutoLoading(scrollTarget);
         sessionState.hasStarted = true;
         refreshStatus(["继续从当前位置往后找下一个候选。"]);
@@ -1165,11 +1204,21 @@
           break;
         }
 
-        fillCandidateQueue(targetTimestamp, searchState.scrollTarget);
+        fillCandidateQueue(targetTimestamp, searchState.scrollTarget, searchState.direction);
         const candidate =
-          takeNextNetworkCandidate(targetTimestamp, searchState.scrollTarget) ||
+          takeNextNetworkCandidate(
+            targetTimestamp,
+            searchState.scrollTarget,
+            sessionState.lastSuggestedPosition,
+            searchState.direction
+          ) ||
           takeNextQueuedCandidate() ||
-          findNextCandidate(targetTimestamp, searchState.scrollTarget, sessionState.lastSuggestedPosition);
+          findNextCandidate(
+            targetTimestamp,
+            searchState.scrollTarget,
+            sessionState.lastSuggestedPosition,
+            searchState.direction
+          );
 
         if (candidate) {
           const validation = validateCandidateByNeighborhood(
@@ -1179,6 +1228,8 @@
           );
           sessionState.visitedKeys.add(candidate.key);
           sessionState.lastSuggestedPosition = candidate.position;
+          sessionState.lastTargetTimestamp = targetTimestamp;
+          sessionState.searchDirection = searchState.direction;
           sessionState.hasStarted = true;
 
           if (validation.passed) {
@@ -1201,13 +1252,16 @@
         }
 
         searchState.steps += 1;
-        const scrollResult = await scrollSearchTarget(searchState.scrollTarget, 1);
-        const { stats } = refreshStatus(["正在自动向下查找，请稍等..."]);
+        const scrollResult = await scrollSearchTarget(searchState.scrollTarget, searchState.direction);
+        const { stats } = refreshStatus([
+          searchState.direction < 0 ? "正在自动向上查找，请稍等..." : "正在自动向下查找，请稍等..."
+        ]);
 
         if (stats.totalCards > searchState.lastCardCount) {
           searchState.lastCardCount = stats.totalCards;
           searchState.idleRounds = 0;
           searchState.bottomHits = 0;
+          searchState.topHits = 0;
           searchState.stallRecoveries = 0;
         } else {
           searchState.idleRounds += 1;
@@ -1215,10 +1269,14 @@
 
         if (scrollResult.moved < 24 && searchState.stallRecoveries < SEARCH_STALL_RECOVERY_LIMIT) {
           searchState.stallRecoveries += 1;
-          const recoveredTop = await recoverStalledSearch(searchState.scrollTarget);
-          if (recoveredTop > scrollResult.afterTop + 24) {
+          const recoveredTop = await recoverStalledSearch(searchState.scrollTarget, searchState.direction);
+          if (
+            (searchState.direction > 0 && recoveredTop > scrollResult.afterTop + 24) ||
+            (searchState.direction < 0 && recoveredTop < scrollResult.afterTop - 24)
+          ) {
             searchState.idleRounds = Math.max(0, searchState.idleRounds - 1);
             searchState.bottomHits = 0;
+            searchState.topHits = 0;
             continue;
           }
         }
@@ -1230,18 +1288,33 @@
             sessionState.scrollTarget = newTarget;
             searchState.idleRounds = 0;
             searchState.bottomHits = 0;
+            searchState.topHits = 0;
             await primeAutoLoading(searchState.scrollTarget);
           }
         }
 
-        if (scrollResult.reachedBottom) {
+        if (searchState.direction > 0 && scrollResult.reachedBottom) {
           searchState.bottomHits += 1;
+        } else if (searchState.direction < 0 && getScrollTop(searchState.scrollTarget) <= 8) {
+          searchState.topHits += 1;
         } else {
           searchState.bottomHits = 0;
+          searchState.topHits = 0;
         }
 
         if (
+          searchState.direction > 0 &&
           searchState.bottomHits >= SEARCH_BOTTOM_CONFIRMATIONS &&
+          searchState.idleRounds >= 3 &&
+          sessionState.candidateQueue.length === 0 &&
+          sessionState.networkCandidateQueue.length === 0
+        ) {
+          break;
+        }
+
+        if (
+          searchState.direction < 0 &&
+          searchState.topHits >= SEARCH_BOTTOM_CONFIRMATIONS &&
           searchState.idleRounds >= 3 &&
           sessionState.candidateQueue.length === 0 &&
           sessionState.networkCandidateQueue.length === 0
@@ -1356,7 +1429,6 @@
         <div class="dlf-panel__actions">
           <button type="button" class="dlf-btn dlf-btn--secondary" id="dlf-stop" disabled>停止查找</button>
         </div>
-        <div class="dlf-panel__status" id="dlf-status">选择一个日期后开始自动查找。</div>
       </div>
     `;
 
@@ -1364,7 +1436,6 @@
     panelReady = true;
 
     panelBodyNode = panel.querySelector(".dlf-panel__body");
-    statusNode = panel.querySelector("#dlf-status");
     targetInput = panel.querySelector("#dlf-target-date");
     yearSelect = panel.querySelector("#dlf-year");
     monthSelect = panel.querySelector("#dlf-month");

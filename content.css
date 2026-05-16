@@ -13,6 +13,7 @@
   bottom: 24px;
   z-index: 2147483647;
   width: 380px;
+  max-height: 560px;
   border-radius: 28px;
   border: 1px solid rgba(111, 234, 255, 0.24);
   background:
@@ -24,15 +25,21 @@
   color: var(--dlf-text);
   font-family: Georgia, "Times New Roman", "Noto Serif SC", serif;
   overflow: hidden;
+  contain: layout paint style;
+  will-change: width, max-height, opacity;
   transition:
-    width 220ms ease,
+    width 260ms ease,
+    max-height 260ms ease,
+    border-radius 260ms ease,
     border-color 220ms ease,
     box-shadow 220ms ease,
-    transform 220ms ease;
+    background 260ms ease,
+    opacity 220ms ease,
+    filter 220ms ease;
+  transform-origin: right bottom;
 }
 
 .dlf-panel:hover {
-  transform: translateY(-2px);
   border-color: rgba(111, 234, 255, 0.34);
   box-shadow: 0 30px 80px rgba(1, 10, 18, 0.5);
 }
@@ -43,8 +50,11 @@
 
 .dlf-panel--collapsed {
   width: 96px;
-  min-height: 96px;
+  max-height: 96px;
   border-radius: 999px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(71, 212, 255, 0.14), transparent 58%),
+    linear-gradient(155deg, rgba(11, 32, 52, 0.96), rgba(5, 17, 29, 0.98));
 }
 
 .dlf-panel * {
@@ -56,6 +66,10 @@
   inset: 0;
   pointer-events: none;
   overflow: hidden;
+  will-change: opacity, filter;
+  transition:
+    opacity 220ms ease,
+    filter 220ms ease;
 }
 
 .dlf-particle {
@@ -89,13 +103,18 @@
   font: 600 12px/1 "Segoe UI", sans-serif;
   letter-spacing: 0.08em;
   cursor: pointer;
-  transition: background 180ms ease, transform 180ms ease, border-color 180ms ease;
+  will-change: opacity, background-color;
+  transition:
+    background 160ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    opacity 180ms ease,
+    color 180ms ease;
 }
 
 .dlf-panel__toggle:hover {
   background: rgba(20, 49, 70, 0.82);
   border-color: rgba(173, 244, 255, 0.42);
-  transform: translateY(-1px);
 }
 
 .dlf-panel--collapsed .dlf-panel__toggle {
@@ -115,29 +134,38 @@
     inset 0 0 24px rgba(71, 212, 255, 0.08);
   font-size: 13px;
   letter-spacing: 0.06em;
+  opacity: 0.96;
 }
 
 .dlf-panel--collapsed .dlf-panel__toggle:hover {
-  transform: translate(-50%, -52%);
+  opacity: 1;
 }
 
 .dlf-panel__body {
   position: relative;
   padding: 22px 22px 20px;
-  transition: opacity 180ms ease, transform 180ms ease;
+  transform-origin: right bottom;
+  overflow: hidden;
+  will-change: opacity, transform, clip-path, filter;
+  clip-path: inset(0 0 0 0 round 22px);
+  transition:
+    opacity 180ms linear,
+    transform 220ms ease,
+    filter 180ms ease,
+    clip-path 220ms ease;
 }
 
 .dlf-panel--collapsed .dlf-panel__body {
   opacity: 0;
-  transform: scale(0.92);
+  transform: translateY(4px);
   pointer-events: none;
-  height: 0;
-  padding: 0;
-  overflow: hidden;
+  filter: blur(3px);
+  clip-path: inset(0 0 100% 0 round 22px);
 }
 
 .dlf-panel--collapsed .dlf-panel__particles {
-  opacity: 0.75;
+  opacity: 0.48;
+  filter: blur(0.3px);
 }
 
 .dlf-panel__eyebrow {
@@ -336,19 +364,6 @@
   color: rgba(236, 254, 255, 0.86);
 }
 
-.dlf-panel__status {
-  margin-top: 16px;
-  padding: 14px 16px;
-  border-radius: 18px;
-  border: 1px solid rgba(173, 244, 255, 0.12);
-  background:
-    linear-gradient(180deg, rgba(7, 24, 39, 0.88), rgba(11, 33, 50, 0.88));
-  color: rgba(236, 254, 255, 0.9);
-  font: 500 12px/1.75 "Segoe UI", "Noto Sans SC", sans-serif;
-  white-space: pre-line;
-  min-height: 72px;
-}
-
 .dlf-target {
   outline: 3px solid rgba(110, 242, 199, 0.98) !important;
   outline-offset: 3px;
@@ -367,11 +382,11 @@
   0%,
   100% {
     transform: translate3d(0, 0, 0) scale(1);
-    opacity: 0.42;
+    opacity: 0.28;
   }
   50% {
-    transform: translate3d(10px, -12px, 0) scale(1.14);
-    opacity: 0.9;
+    transform: translate3d(8px, -10px, 0) scale(1.08);
+    opacity: 0.62;
   }
 }
 
